@@ -12,6 +12,7 @@ env:
   DEPLOYMENT_NAME: app-deployment
   CONTAINER_NAME: notes-api-app
   NAMESPACE: default
+  ECR_REGISTRY: 916205284554.dkr.ecr.us-east-1.amazonaws.com
 
 jobs:
   build_and_push:
@@ -39,13 +40,13 @@ jobs:
       - name: Login to Amazon ECR
         run: |
           aws ecr get-login-password --region "$AWS_REGION" \
-            | docker login --username AWS --password-stdin 916205284554.dkr.ecr.$AWS_REGION.amazonaws.com
+            | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
       - name: Build and push image
         id: build
         run: |
           set -e
-          IMAGE_URI=916205284554.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
           docker build -t "$IMAGE_URI" .
           docker push "$IMAGE_URI"
           echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
@@ -53,6 +54,9 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     needs: build_and_push
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
       - name: Checkout
@@ -70,25 +74,43 @@ jobs:
           echo "${{ secrets.KUBE_CONFIG }}" > ~/.kube/config
           chmod 600 ~/.kube/config
 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::916205284554:role/github-actions-ecr-push-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
       - name: Test cluster access
+        run: kubectl get nodes
+
+      - name: Create or refresh ECR pull secret
         run: |
-          kubectl get nodes
+          aws ecr get-login-password --region "$AWS_REGION" | \
+          kubectl create secret docker-registry ecr-secret \
+            --docker-server="$ECR_REGISTRY" \
+            --docker-username=AWS \
+            --docker-password="$(cat -)" \
+            --namespace "$NAMESPACE" \
+            --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Apply app manifest
         run: |
-          kubectl apply -f k8s/app-deployment.yaml -n $NAMESPACE
+          kubectl apply -f k8s/app-deployment.yaml -n "$NAMESPACE"
 
       - name: Update deployment image
         run: |
-          kubectl set image deployment/$DEPLOYMENT_NAME \
-            $CONTAINER_NAME=${{ needs.build_and_push.outputs.image_uri }} \
-            -n $NAMESPACE
+          kubectl set image deployment/"$DEPLOYMENT_NAME" \
+            "$CONTAINER_NAME"="${{ needs.build_and_push.outputs.image_uri }}" \
+            -n "$NAMESPACE"
 
       - name: Show deployment image
         run: |
-          kubectl get deployment $DEPLOYMENT_NAME -n $NAMESPACE -o jsonpath='{.spec.template.spec.containers[*].image}'
+          kubectl get deployment "$DEPLOYMENT_NAME" -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[*].image}'
           echo
 
       - name: Check rollout status
         run: |
-          kubectl rollout status deployment/$DEPLOYMENT_NAME -n $NAMESPACE --timeout=180s
+          kubectl rollout status deployment/"$DEPLOYMENT_NAME" -n "$NAMESPACE" --timeout=180s
