@@ -32,7 +32,7 @@ It includes:
 
 ## 🏗️ Architecture (K3s-based Deployment)
 
-![Architecture](docs/images/app-architecture.png)
+![Architecture](docs/images/App-architecture.png)
 
 > High-level architecture showing how external traffic enters the cluster, is routed via the NGINX ingress controller, and reaches application pods and database services, with monitoring integrated.
 
